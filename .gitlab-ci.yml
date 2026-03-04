@@ -1,0 +1,203 @@
+# Этапы выполняются последовательно в указанном порядке
+# Каждый следующий этап начинается только после успешного завершения предыдущего
+stages:
+  - install  # Этап установки зависимостей и подготовки окружения
+  - test # Этап запуска тестов
+  - report # Этап генерации и публикации отчетов
+
+variables:
+  # Тут надо указать ваш путь через echo $PATH
+  PATH: "/c/Users/Oleg/bin"
+
+  # Директория для кэширования pip пакетов (ускоряет установку зависимостей)
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+  # PYTHONPATH - указывает Python, где искать модули и пакеты
+  # $CI_PROJECT_DIR - встроенная переменная GitLab, указывающая на корень проекта
+  PYTHONPATH: "$CI_PROJECT_DIR"
+
+  # Путь к виртуальному окружению Python
+  # Изолирует зависимости проекта от системных пакетов
+  VENV_PATH: "$CI_PROJECT_DIR/.venv"
+
+  # Директория для сохранения raw результатов Allure (JSON файлы с данными тестов)
+  ALLURE_RESULTS_PATH: "allure-results"
+
+  # Директория для финального HTML отчета Allure
+  ALLURE_REPORT_PATH: "allure-report"
+
+
+# Кэш сохраняется между запусками pipeline для ускорения работы
+cache:
+  # Ключ кэша - уникальный идентификатор для каждой ветки
+  # $CI_COMMIT_REF_SLUG - slug имени ветки (например, feature-branch становится feature-branch)
+  key: "$CI_COMMIT_REF_SLUG"
+
+  # Директории, которые будут кэшироваться между запусками
+  paths:
+    - .cache/pip/      # Кэш установленных pip пакетов
+    - .venv/           # Виртуальное окружение Python
+
+install_dependencies:
+  stage: install
+  tags:
+    # Указывается тэг ранера, где должен выполнятяс скрипт
+    - windowsThreadQa
+  script:
+    # Создание окружения
+    - python -m venv $VENV_PATH
+
+     # Активация виртуального окружения
+    - source $VENV_PATH/Scripts/activate
+
+    # Установка менеджера пакетов pip
+    - python -m pip install --upgrade pip
+
+    # Установка всех зависимостей в проекте
+    - pip install -r requirements.txt
+
+    # Установка хрома для playwright
+    # - playwright install --with-deps chromium
+
+  # Артефакты - файлы, которые передаются в следующие job'ы
+  artifacts:
+    paths:
+      - $VENV_PATH/ # Сохраняем виртуальное окружение для переиспользования
+    expire_in: 1 hour # Артефакты удаляются через 1 час (экономия места)
+
+test_execution:
+  # Этап запуска тестов
+  stage: test
+
+  # Тег для выбора runner
+  tags:
+    - windowsThreadQa
+
+  # Зависимости - указываем, от каких job'ов нужны артефакты
+  # Этот job получит виртуальное окружение из install_dependencies
+  dependencies:
+    - install_dependencies
+
+  # Скрипты выполнения тестов
+  script:
+    # Активация виртуального окружения
+    - source $VENV_PATH/Scripts/activate
+
+    # Создание директории для результатов Allure
+    # -p флаг создает родительские директории при необходимости
+    - mkdir -p $ALLURE_RESULTS_PATH
+
+    # Запуск pytest с множеством параметров
+    # Символ | позволяет писать многострочную команду
+    - |
+      pytest tests/ \
+        --alluredir=$ALLURE_RESULTS_PATH \    # Сохранение результатов для Allure
+        --tb=short \                           # Короткий формат traceback при ошибках
+        --verbose \                            # Подробный вывод информации о тестах
+        --json-report \                        # Генерация JSON отчета
+        --json-report-file=pytest-report.json \  # Имя файла JSON отчета
+        --reruns=2 \                           # Повторный запуск упавших тестов (2 раза)
+        --reruns-delay=1 \                     # Задержка 1 секунда между повторами
+        -n auto                                # Параллельный запуск (auto определяет кол-во процессов)
+
+  # Артефакты этого job'а
+  artifacts:
+    paths:
+      - $VENV_PATH/                # Виртуальное окружение
+      - $ALLURE_RESULTS_PATH/      # Raw результаты Allure
+      - pytest-report.json         # JSON отчет pytest
+    expire_in: 1 week              # Хранятся 1 неделю
+    when: always                   # Сохраняются даже при падении тестов
+
+  # Разрешает pipeline продолжиться, даже если тесты упали
+  # Нужно для генерации отчета о падениях
+  allow_failure: true
+
+generate_report:
+  # Тег для runner
+  tags:
+    - windowsThreadQa
+
+  # Этап генерации отчета
+  stage: report
+
+  # Зависимости - получаем артефакты из test_execution
+  dependencies:
+    - test_execution
+
+  # Основные скрипты для генерации отчета
+  script:
+    # Скачивание Allure CLI инструмента с GitHub
+    - curl -L -o allure-2.24.0.tgz https://github.com/allure-framework/allure2/releases/download/2.24.0/allure-2.24.0.tgz
+
+    # Распаковка архива с Allure
+    - tar -xzf allure-2.24.0.tgz
+
+    # Добавление Allure в PATH для текущей сессии
+    - export PATH=$PATH:$PWD/allure-2.24.0/bin
+
+    # Проверка версии Allure (для диагностики)
+    - allure --version
+
+    # Создание директории для HTML отчета
+    - mkdir -p $ALLURE_REPORT_PATH
+
+    # Генерация HTML отчета из raw результатов
+    # -o указывает output директорию
+    # --clean удаляет предыдущие отчеты
+    - allure generate $ALLURE_RESULTS_PATH -o $ALLURE_REPORT_PATH --clean
+
+    # Формирование URL для доступа к отчету через GitLab Pages/Artifacts
+    # Многострочная команда для создания переменной с URL
+    - |
+      REPORT_URL="https://${CI_PROJECT_NAMESPACE}.gitlab.io/-/${CI_PROJECT_NAME}/-/jobs/${CI_JOB_ID}/artifacts/allure-report/index.html"
+      echo "✅ Report: $REPORT_URL"
+      # Сохранение URL в файл для использования в after_script
+      echo "REPORT_URL=$REPORT_URL" > report_url.env
+
+  # after_script выполняется после основного script
+  # Выполняется всегда, даже если script упал
+  after_script:
+    # Активация виртуального окружения
+    - source $VENV_PATH/Scripts/activate
+
+    # Извлечение статистики тестов из JSON отчета pytest
+    # Скрипт парсит pytest-report.json и создает переменные окружения
+    # --format env выводит в формате KEY=VALUE
+    - python scripts/extract_test_stats.py pytest-report.json --format env > test_stats.env
+
+    # Загрузка переменных из файлов в текущую сессию
+    - source report_url.env     # Загружает REPORT_URL
+    - source test_stats.env     # Загружает TOTAL_TESTS, PASSED_TESTS, FAILED_TESTS, SUCCESS_RATE, TEST_DURATION
+
+    # Определение статуса pipeline на основе результатов тестов
+    # Если нет упавших тестов И есть хотя бы один тест - успех
+    - |
+      if [ $FAILED_TESTS -eq 0 ] && [ $TOTAL_TESTS -gt 0 ]; then
+        PIPELINE_STATUS="success"
+      else
+        PIPELINE_STATUS="failed"
+      fi
+
+    # Отправка уведомления в Telegram
+    # Передаются все метрики тестирования и информация о pipeline
+    - |     
+      python scripts/send_telegram_notification.py \
+        --total "$TOTAL_TESTS" \              # Общее количество тестов
+        --passed "$PASSED_TESTS" \            # Количество пройденных тестов
+        --failed "$FAILED_TESTS" \            # Количество упавших тестов
+        --success-rate "$SUCCESS_RATE" \      # Процент успешности
+        --duration "$TEST_DURATION" \         # Длительность тестов
+        --report-url "$REPORT_URL" \          # Ссылка на Allure отчет
+        --branch "$CI_COMMIT_REF_NAME" \      # Название ветки
+        --commit-sha "$CI_COMMIT_SHORT_SHA" \ # Короткий SHA коммита
+        --commit-msg "$CI_COMMIT_MESSAGE" \   # Сообщение коммита
+        --pipeline-status "$PIPELINE_STATUS" \ # Статус pipeline (success/failed)
+        --pipeline-url "$CI_PIPELINE_URL"     # Ссылка на pipeline в GitLab
+
+  # Артефакты этого job'а
+  artifacts:
+    paths:
+      - $ALLURE_REPORT_PATH/      # HTML отчет Allure
+    expire_in: 1 month            # Хранится 1 месяц
+    when: always                  # Сохраняется всегда, даже при ошибках
